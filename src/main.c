@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define MAX_LEN 1024
 
@@ -51,7 +54,6 @@ Cmd* parse_command(char *cmd_str) {
     cmd->program_name = cmd->args[0];
     cmd->redirect[0] = cmd->redirect[1] = -1;
 
-    print_command(cmd);
     free(copy);
     return cmd;
 }
@@ -78,13 +80,68 @@ Pipeline* parse_pipeline(char *line) {
     return pipe;
 }
 
+void close_all_pipes(int n_pips, int (*pipes)[2]) {
+    for (int i = 0; i< n_pips; ++i) {
+        close(pipes[i][0]);
+        close(pipes[i][1]);
+    }
+}
+
+int exec_with_redir(Cmd* command, int n_pipes, int (*pipes)[2]) {
+    int fd = -1;
+    if ((fd = command->redirect[0] != -1)) {
+        dup2(fd, STDIN_FILENO);
+    }
+    if ((fd = command->redirect[1] != -1)) {
+        dup2(fd, STDOUT_FILENO);
+    }
+    close_all_pipes(n_pipes,pipes);
+    return execvp(command->program_name, command->args);
+}
+
+pid_t run_with_redir(Cmd* command, int n_pipes, int (*pipes)[2]) {
+    pid_t child_pid = fork();
+    
+    if (child_pid) {
+        switch (child_pid) {
+            case -1:
+                fprintf(stderr, "Error: while creating a sub process\n");
+                return -1;
+            default:
+                return child_pid;
+        }
+    } else {
+        exec_with_redir(command,n_pipes,pipes);
+        perror("Failed Process");
+        return 0;
+    }
+}
+
 int main(void) {
     char *line = NULL;
     size_t len = 0;
 
-    while (prompt_and_get_input("[Shark]$ ",&line, &len) != 0) {
-        Pipeline *pipe = parse_pipeline(line);
-        int n_pipes = pipe->n_cmds - 1;
+    while (prompt_and_get_input("[Tuna]$ ",&line, &len) != 0) {
+        Pipeline *pipeline = parse_pipeline(line);
+        int n_pipes = pipeline->n_cmds - 1;
+
+        int (*pipes)[2] = calloc(sizeof(int[2]), n_pipes);
+
+        for (size_t i=1; i< pipeline->n_cmds; ++i) {
+            pipe(pipes[i-1]);
+            pipeline->cmds[i]->redirect[STDIN_FILENO] = pipes[i-1][0];
+            pipeline->cmds[i-1]->redirect[STDOUT_FILENO] = pipes[i-1][1];
+        }
+
+        for (size_t i = 0; i < pipeline->n_cmds; ++i) {
+            run_with_redir(pipeline->cmds[i],n_pipes,pipes);
+        }
+        close_all_pipes(n_pipes, pipes);
+
+        for (size_t i = 0;i < pipeline->n_cmds; ++i) {
+            wait(NULL);
+        }
     }
+    fputs("\n", stdout);
     return 0;
 }
