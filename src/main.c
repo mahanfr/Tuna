@@ -1,3 +1,5 @@
+#include <asm-generic/errno-base.h>
+#include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -5,6 +7,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <stdbool.h>
 
 #define MAX_LEN 1024
 
@@ -23,18 +26,6 @@ ssize_t prompt_and_get_input(const char* prompt,char **line, size_t *len) {
     fputs(prompt, stdout);
     return getline(line, len, stdin);
 }
-
-void print_command(Cmd* command) {
-  char** arg = command->args;
-  int i = 0;
-
-  fprintf(stderr, "progname: %s\n", command->program_name);
-
-  for (i = 0, arg = command->args; *arg; ++arg, ++i) {
-    fprintf(stderr, " args[%d]: %s\n", i, *arg);
-  }
-}
-
 
 char* next_non_empty(char **line) {
   char *tok;
@@ -100,6 +91,11 @@ int exec_with_redir(Cmd* command, int n_pipes, int (*pipes)[2]) {
 }
 
 pid_t run_with_redir(Cmd* command, int n_pipes, int (*pipes)[2]) {
+    if (command->program_name) {
+        if (strcmp(command->program_name ,"exit") == 0) {
+            return -69;
+        }
+    }
     pid_t child_pid = fork();
     
     if (child_pid) {
@@ -111,22 +107,39 @@ pid_t run_with_redir(Cmd* command, int n_pipes, int (*pipes)[2]) {
                 return child_pid;
         }
     } else {
-        exec_with_redir(command,n_pipes,pipes);
+        if (exec_with_redir(command,n_pipes,pipes) == -69) {
+            return -69;
+        }
         perror("Failed Process");
         return 0;
     }
+}
+
+static void handler(int signum) {
+    (void) signum;
 }
 
 int main(void) {
     char *line = NULL;
     size_t len = 0;
 
-    while (prompt_and_get_input("[Tuna]$ ",&line, &len) != 0) {
+    bool isrun = true;
+
+    struct sigaction sa;
+    sa.sa_handler = handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGINT, &sa, NULL);
+
+    while (isrun) {
+        ssize_t res = prompt_and_get_input("[Tuna]$ ",&line, &len);
+        if (res < 0)
+            break;
+        
         Pipeline *pipeline = parse_pipeline(line);
         int n_pipes = pipeline->n_cmds - 1;
 
         int (*pipes)[2] = calloc(sizeof(int[2]), n_pipes);
-
         for (size_t i=1; i< pipeline->n_cmds; ++i) {
             pipe(pipes[i-1]);
             pipeline->cmds[i]->redirect[STDIN_FILENO] = pipes[i-1][0];
@@ -134,7 +147,9 @@ int main(void) {
         }
 
         for (size_t i = 0; i < pipeline->n_cmds; ++i) {
-            run_with_redir(pipeline->cmds[i],n_pipes,pipes);
+            if (run_with_redir(pipeline->cmds[i],n_pipes,pipes) == -69) {
+                isrun = false;
+            }
         }
         close_all_pipes(n_pipes, pipes);
 
